@@ -8,6 +8,7 @@ from src.DeviceDiscovery import DeviceDiscovery
 from src.FileReceiver import FileReceiver
 from src.FileSender import FileSender
 from src.SecurityHandler import SecurityHandler
+from src.handDetection import HandDetector
 
 
 class FileTransferCLI:
@@ -25,6 +26,8 @@ class FileTransferCLI:
         return None
 
     def show_main_menu(self):
+        
+
         while True:
             os.system('cls' if os.name == 'nt' else 'clear')
             print("=== HandAirDrop CLI ===")
