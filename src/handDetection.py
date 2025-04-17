@@ -51,18 +51,18 @@ class HandDetector:
             return None
 
         try:
-            # Check distance between fingertips and palm
-            palm_base = lm_list[0]  # Wrist
-            tips = [lm_list[i] for i in [8, 12, 16, 20]]  # Finger tips
-            mcp_joints = [lm_list[i] for i in [5, 9, 13, 17]]  # Finger bases
-            
+            tips = [lm_list[i] for i in [8, 12, 16, 20]]  # Index to pinky tips
+            mcp_joints = [lm_list[i] for i in [5, 9, 13, 17]]
+
             extended_fingers = 0
             for tip, mcp in zip(tips, mcp_joints):
-                # Check if fingertip is above the MCP joint (finger extended)
-                if tip[2] < mcp[2]:  # Comparing y-coordinates
+                if tip[2] < mcp[2]:  # y-coord: lower on screen means finger is extended
                     extended_fingers += 1
-            
-            return "Palm" if extended_fingers >= 3 else "Fist"
+
+            if extended_fingers >= 3:
+                return "Palm"
+            else:
+                return "Fist"
         except Exception as e:
             print(f"Gesture detection error: {e}")
             return None
