@@ -27,6 +27,7 @@ class FileTransferCLI:
         self.sender_mode_start = 0
         self.device_selection_mode = False
         self.device_selection_start = 0
+        self.last_gesture = None
 
     def _load_key(self):
         if os.path.exists(self.key_file):
@@ -74,13 +75,13 @@ class FileTransferCLI:
                             # Start device selection
                             self.device_selection_mode = True
                             self.device_selection_start = current_time
-                            self._show_feedback(img, "Select device - show Palm to confirm")
+                            self._show_feedback(img, "Searching for devices...")
                             devices = self._wait_for_devices()
                             if devices:
-                                target_ip = self._select_device(devices)
-                                if target_ip:
-                                    self.detector.select_device(target_ip)
-                                    self._show_feedback(img, f"Device selected: {target_ip}")
+                                # Automatically select the first available device
+                                target_ip = devices[0][0]
+                                self.detector.select_device(target_ip)
+                                self._show_feedback(img, f"Device selected: {target_ip}")
                         else:
                             # Already in device selection mode, show feedback
                             self._show_feedback(img, "Device already selected")
@@ -228,22 +229,6 @@ class FileTransferCLI:
         print("\nNo devices found!")
         time.sleep(1)
         return None
-
-    def _select_device(self, devices):
-        print("\nAvailable devices:")
-        for idx, (ip, name) in enumerate(devices, 1):
-            print(f"{idx}. {name} ({ip})")
-        print("0. Rescan devices")
-
-        try:
-            choice = int(input("\nSelect device: "))
-            if choice == 0:
-                return None
-            return devices[choice - 1][0]
-        except (ValueError, IndexError):
-            print("Invalid selection!")
-            time.sleep(1)
-            return None
 
 
 if __name__ == "__main__":
