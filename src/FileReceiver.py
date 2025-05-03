@@ -21,9 +21,15 @@ class FileReceiver:
 
     def start(self):
         """Start listening for incoming connections"""
-        self.sock.bind(('', self.port))
-        self.sock.listen(1)
-        print(f"Listening on port {self.port}...")
+        try:
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.sock.bind(('', self.port))
+            self.sock.listen(1)
+            print(f"Listening on port {self.port}...")
+            return True
+        except socket.error as e:
+            print(f"Failed to start receiver: {str(e)}")
+            return False
 
     def accept_connection(self):
         """Accept an incoming file transfer connection"""

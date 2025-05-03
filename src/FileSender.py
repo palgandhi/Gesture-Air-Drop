@@ -108,6 +108,12 @@ class FileSender:
                 break
             yield chunk
 
+    def stop(self):
+        """Close the socket connection"""
+        if self.sock:
+            self.sock.close()
+            self.sock = None
+
     def __del__(self):
         """Destructor to ensure socket cleanup"""
         if self.sock:

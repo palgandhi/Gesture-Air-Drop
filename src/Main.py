@@ -181,7 +181,11 @@ class FileTransferCLI:
                 if self.key:
                     receiver.set_decryption(self.key)
 
-                receiver.start()
+                if not receiver.start():
+                    self._update_status("Failed to start receiver", (0, 0, 255))
+                    time.sleep(1)
+                    continue
+
                 self._update_status("Waiting for sender...", (0, 255, 255))
                 receiver.accept_connection()
                 saved_path = receiver.receive_file(self._progress_bar)
@@ -191,15 +195,19 @@ class FileTransferCLI:
                     break
                 else:
                     self._update_status("Reception failed", (0, 0, 255))
-            except Exception as e:
+            except socket.error as e:
                 if "Address already in use" in str(e):
                     # Try a different port
                     self.port += 1
+                    self._update_status(f"Port in use, trying {self.port}", (0, 255, 255))
                     continue
+                self._update_status(f"Connection error: {str(e)}", (0, 0, 255))
+            except Exception as e:
                 self._update_status(f"Error: {str(e)}", (0, 0, 255))
             finally:
                 if 'receiver' in locals():
                     receiver.stop()
+            time.sleep(1)  # Add a small delay between attempts
         self.receiver_mode = False
 
     def _send_file_to_receiver(self):
@@ -243,11 +251,15 @@ class FileTransferCLI:
                     break
                 else:
                     self._update_status("Transfer failed", (0, 0, 255))
-            except Exception as e:
+            except socket.error as e:
                 if "Address already in use" in str(e):
                     # Try a different port
                     self.port += 1
+                    self._update_status(f"Port in use, trying {self.port}", (0, 255, 255))
                     continue
+                self._update_status(f"Connection error: {str(e)}", (0, 0, 255))
+                break
+            except Exception as e:
                 self._update_status(f"Error: {str(e)}", (0, 0, 255))
                 break
             finally:
