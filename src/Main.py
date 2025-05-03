@@ -4,6 +4,7 @@ import time
 import cv2
 import threading
 import socket
+import glob
 
 from DeviceDiscovery import DeviceDiscovery
 from FileReceiver import FileReceiver
@@ -39,6 +40,13 @@ class FileTransferCLI:
         self.receiver_mode = False
         self.receiver_mode_start = 0
         self.receiver_mode_timeout = 10  # seconds
+        
+        # File selection state
+        self.file_selection_mode = False
+        self.available_files = []
+        self.selected_file_index = 0
+        self.file_selection_start = 0
+        self.file_selection_timeout = 10  # seconds
 
     def _load_key(self):
         if os.path.exists(self.key_file):
@@ -73,6 +81,12 @@ class FileTransferCLI:
                 self._update_status("Receiver mode expired", (0, 0, 255))
                 self.receiver_mode = False
 
+            # Handle file selection timeout
+            if self.file_selection_mode and (current_time - self.file_selection_start) > self.file_selection_timeout:
+                self._update_status("File selection expired", (0, 0, 255))
+                self.file_selection_mode = False
+                self.available_files = []
+
             if lmList and len(lmList) >= 21:
                 gesture = self.detector.detect_gesture(lmList)
                 
@@ -80,17 +94,28 @@ class FileTransferCLI:
                     self.last_gesture_time = current_time
 
                     if gesture == "Fist":
-                        if not self.standby_mode and not self.receiver_mode:
-                            # Start standby mode
-                            self.standby_mode = True
-                            self.sender_mode_start = current_time
+                        if not self.standby_mode and not self.receiver_mode and not self.file_selection_mode:
+                            # Start file selection mode
+                            self.file_selection_mode = True
+                            self.file_selection_start = current_time
                             self._update_status("Select file to send", (0, 255, 255))
-                            threading.Thread(target=self._prepare_file, daemon=True).start()
+                            threading.Thread(target=self._prepare_files, daemon=True).start()
+                        elif self.file_selection_mode and self.available_files:
+                            # Select next file
+                            self.selected_file_index = (self.selected_file_index + 1) % len(self.available_files)
+                            self._update_status(f"Selected: {os.path.basename(self.available_files[self.selected_file_index])}", (0, 255, 255))
                         else:
-                            self._update_status("Already in standby mode", (0, 255, 255))
+                            self._update_status("No files available", (0, 0, 255))
 
                     elif gesture == "Palm":
-                        if not self.receiver_mode and not self.standby_mode:
+                        if self.file_selection_mode and self.available_files:
+                            # Confirm file selection
+                            self.standby_file = self.available_files[self.selected_file_index]
+                            self.standby_mode = True
+                            self.sender_mode_start = current_time
+                            self.file_selection_mode = False
+                            self._update_status("File ready - Show Palm to send", (0, 255, 0))
+                        elif not self.receiver_mode and not self.standby_mode:
                             # Start receiver mode
                             self.receiver_mode = True
                             self.receiver_mode_start = current_time
@@ -113,6 +138,10 @@ class FileTransferCLI:
             if self.detector.current_gesture:
                 self._draw_gesture_feedback(img)
             
+            # Display file selection
+            if self.file_selection_mode and self.available_files:
+                self._draw_file_selection(img)
+            
             cv2.imshow("Gesture Control", img)
 
             key = cv2.waitKey(1) & 0xFF
@@ -121,40 +150,57 @@ class FileTransferCLI:
 
         self.cleanup()
 
-    def _prepare_file(self):
-        """Prepare file for sending in standby mode"""
-        os.system('cls' if os.name == 'nt' else 'clear')
-        print("=== Select File to Send ===")
+    def _prepare_files(self):
+        """Prepare list of available files"""
+        # Get all files from Downloads and Desktop
+        downloads = os.path.expanduser("~/Downloads")
+        desktop = os.path.expanduser("~/Desktop")
         
-        file_path = input("\nEnter path to file: ").strip()
-        if not os.path.exists(file_path):
-            self._update_status("File does not exist", (0, 0, 255))
-            self.standby_mode = False
+        self.available_files = []
+        for path in [downloads, desktop]:
+            if os.path.exists(path):
+                self.available_files.extend(glob.glob(os.path.join(path, "*")))
+        
+        # Filter out directories
+        self.available_files = [f for f in self.available_files if os.path.isfile(f)]
+        
+        if not self.available_files:
+            self._update_status("No files found", (0, 0, 255))
+            self.file_selection_mode = False
             return
-
-        self.standby_file = file_path
-        self._update_status("File ready - Show Palm to send", (0, 255, 0))
+        
+        self.selected_file_index = 0
+        self._update_status(f"Selected: {os.path.basename(self.available_files[0])}", (0, 255, 255))
 
     def _wait_for_sender(self):
         """Wait for a sender to connect"""
-        receiver = FileReceiver(self.port)
-        if self.key:
-            receiver.set_decryption(self.key)
+        # Create a new socket for each attempt to avoid address in use error
+        while self.receiver_mode:
+            try:
+                receiver = FileReceiver(self.port)
+                if self.key:
+                    receiver.set_decryption(self.key)
 
-        try:
-            receiver.start()
-            self._update_status("Waiting for sender...", (0, 255, 255))
-            receiver.accept_connection()
-            saved_path = receiver.receive_file(self._progress_bar)
-            if saved_path:
-                self._update_status("File received!", (0, 255, 0))
-                print(f"\n🎉 File saved to: {saved_path}")
-            else:
-                self._update_status("Reception failed", (0, 0, 255))
-        except Exception as e:
-            self._update_status(f"Error: {str(e)}", (0, 0, 255))
-        finally:
-            self.receiver_mode = False
+                receiver.start()
+                self._update_status("Waiting for sender...", (0, 255, 255))
+                receiver.accept_connection()
+                saved_path = receiver.receive_file(self._progress_bar)
+                if saved_path:
+                    self._update_status("File received!", (0, 255, 0))
+                    print(f"\n🎉 File saved to: {saved_path}")
+                    break
+                else:
+                    self._update_status("Reception failed", (0, 0, 255))
+            except Exception as e:
+                if "Address already in use" in str(e):
+                    # Try a different port
+                    self.port += 1
+                    continue
+                self._update_status(f"Error: {str(e)}", (0, 0, 255))
+            finally:
+                if 'receiver' in locals():
+                    receiver.stop()
+        self.receiver_mode = False
 
     def _send_file_to_receiver(self):
         """Send file to waiting receiver"""
@@ -185,20 +231,56 @@ class FileTransferCLI:
             self._update_status("No receivers found", (0, 0, 255))
             return
 
-        sender = FileSender(target_ip, self.port)
-        if self.key:
-            sender.set_encryption(self.key)
+        # Create a new sender for each attempt
+        while True:
+            try:
+                sender = FileSender(target_ip, self.port)
+                if self.key:
+                    sender.set_encryption(self.key)
 
-        try:
-            if sender.send_file(self.standby_file, self._progress_bar):
-                self._update_status("Transfer successful!", (0, 255, 0))
-            else:
-                self._update_status("Transfer failed", (0, 0, 255))
-        except Exception as e:
-            self._update_status(f"Error: {str(e)}", (0, 0, 255))
-        finally:
-            self.standby_mode = False
-            self.standby_file = None
+                if sender.send_file(self.standby_file, self._progress_bar):
+                    self._update_status("Transfer successful!", (0, 255, 0))
+                    break
+                else:
+                    self._update_status("Transfer failed", (0, 0, 255))
+            except Exception as e:
+                if "Address already in use" in str(e):
+                    # Try a different port
+                    self.port += 1
+                    continue
+                self._update_status(f"Error: {str(e)}", (0, 0, 255))
+                break
+            finally:
+                if 'sender' in locals():
+                    sender.stop()
+
+        self.standby_mode = False
+        self.standby_file = None
+
+    def _draw_file_selection(self, img):
+        """Draw file selection interface"""
+        if not self.available_files:
+            return
+
+        # Draw file list background
+        cv2.rectangle(img, (10, 120), (img.shape[1] - 10, 300), (0, 0, 0), -1)
+        
+        # Draw selected file
+        selected_file = os.path.basename(self.available_files[self.selected_file_index])
+        cv2.putText(img, f"Selected: {selected_file}", (20, 150), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        
+        # Draw instructions
+        cv2.putText(img, "Fist: Next file", (20, 180), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        cv2.putText(img, "Palm: Confirm selection", (20, 210), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        
+        # Draw timeout
+        remaining = int(self.file_selection_timeout - 
+                      (time.time() - self.file_selection_start))
+        cv2.putText(img, f"Timeout in: {remaining}s", (20, 240), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 
     def _update_status(self, message, color):
         """Update status message and color"""
@@ -251,7 +333,13 @@ class FileTransferCLI:
 
     def _show_instructions(self, img):
         """Draw instructions on the image"""
-        if self.standby_mode:
+        if self.file_selection_mode:
+            instructions = [
+                "Fist: Next file",
+                "Palm: Confirm selection",
+                "Press '1' or ESC to Exit"
+            ]
+        elif self.standby_mode:
             instructions = [
                 "Fist: File ready to send",
                 "Palm: Send file to receiver",
