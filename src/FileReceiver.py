@@ -102,6 +102,15 @@ class FileReceiver:
             data.extend(packet)
         return bytes(data)
 
+    def stop(self):
+        """Close all socket connections"""
+        if self.conn:
+            self.conn.close()
+            self.conn = None
+        if self.sock:
+            self.sock.close()
+            self.sock = None
+
 # ---------------------------
 # Example Usage (Test Script)
 # ---------------------------
