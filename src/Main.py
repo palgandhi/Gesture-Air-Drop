@@ -216,11 +216,13 @@ class FileTransferCLI:
         """Send file to waiting receiver"""
         if not self.standby_file:
             self._update_status("No file selected", (0, 0, 255))
+            self.standby_mode = False
             return
 
         devices = self._wait_for_devices()
         if not devices:
             self._update_status("No receivers found", (0, 0, 255))
+            self.standby_mode = False
             return
 
         # Find a device in receiver mode
@@ -239,37 +241,31 @@ class FileTransferCLI:
 
         if not target_ip:
             self._update_status("No receivers found", (0, 0, 255))
+            self.standby_mode = False
             return
 
-        # Create a new sender for each attempt
-        while True:
-            try:
-                sender = FileSender(target_ip, self.port)
-                if self.key:
-                    sender.set_encryption(self.key)
+        # Try to send the file once
+        try:
+            sender = FileSender(target_ip, self.port)
+            if self.key:
+                sender.set_encryption(self.key)
 
-                if sender.send_file(self.standby_file, self._progress_bar):
-                    self._update_status("Transfer successful!", (0, 255, 0))
-                    break
-                else:
-                    self._update_status("Transfer failed", (0, 0, 255))
-            except socket.error as e:
-                if "Address already in use" in str(e):
-                    # Try a different port
-                    self.port += 1
-                    self._update_status(f"Port in use, trying {self.port}", (0, 255, 255))
-                    continue
+            if sender.send_file(self.standby_file, self._progress_bar):
+                self._update_status("Transfer successful!", (0, 255, 0))
+            else:
+                self._update_status("Transfer failed", (0, 0, 255))
+        except socket.error as e:
+            if "Address already in use" in str(e):
+                self._update_status(f"Port in use, try again", (0, 0, 255))
+            else:
                 self._update_status(f"Connection error: {str(e)}", (0, 0, 255))
-                break
-            except Exception as e:
-                self._update_status(f"Error: {str(e)}", (0, 0, 255))
-                break
-            finally:
-                if 'sender' in locals():
-                    sender.stop()
-
-        self.standby_mode = False
-        self.standby_file = None
+        except Exception as e:
+            self._update_status(f"Error: {str(e)}", (0, 0, 255))
+        finally:
+            if 'sender' in locals():
+                sender.stop()
+            self.standby_mode = False
+            self.standby_file = None
 
     def _draw_file_selection(self, img):
         """Draw file selection interface"""
