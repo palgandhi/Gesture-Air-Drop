@@ -2,6 +2,7 @@
 import os
 import time
 import cv2
+import threading
 
 from DeviceDiscovery import DeviceDiscovery
 from FileReceiver import FileReceiver
@@ -28,6 +29,8 @@ class FileTransferCLI:
         self.device_selection_mode = False
         self.device_selection_start = 0
         self.last_gesture = None
+        self.status_message = "Ready"
+        self.status_color = (0, 255, 0)  # Green
 
     def _load_key(self):
         if os.path.exists(self.key_file):
@@ -53,62 +56,53 @@ class FileTransferCLI:
 
             # Handle sender mode timeout
             if self.sender_mode and (current_time - self.sender_mode_start) > self.sender_mode_timeout:
-                self._show_feedback(img, "Sender mode expired")
+                self._update_status("Sender mode expired", (0, 0, 255))
                 self.sender_mode = False
                 self.detector.clear_selected_device()
 
             # Handle device selection timeout
             if self.device_selection_mode and (current_time - self.device_selection_start) > self.detector.device_selection_timeout:
-                self._show_feedback(img, "Device selection expired")
+                self._update_status("Device selection expired", (0, 0, 255))
                 self.device_selection_mode = False
                 self.detector.clear_selected_device()
 
             if lmList and len(lmList) >= 21:
-                gesture = self.detector.is_palm_or_fist(lmList)
+                gesture = self.detector.detect_gesture(lmList)
                 
                 if gesture and (current_time - self.last_gesture_time) > self.gesture_cooldown:
                     self.last_gesture_time = current_time
 
                     if gesture == "Fist":
-                        print(f"Gesture detected: {gesture}")
                         if not self.device_selection_mode:
                             # Start device selection
                             self.device_selection_mode = True
                             self.device_selection_start = current_time
-                            self._show_feedback(img, "Searching for devices...")
-                            devices = self._wait_for_devices()
-                            if devices:
-                                # Automatically select the first available device
-                                target_ip = devices[0][0]
-                                self.detector.select_device(target_ip)
-                                self._show_feedback(img, f"Device selected: {target_ip}")
+                            self._update_status("Searching for devices...", (0, 255, 255))
+                            
+                            # Start device discovery in a separate thread
+                            threading.Thread(target=self._discover_devices, daemon=True).start()
                         else:
-                            # Already in device selection mode, show feedback
-                            self._show_feedback(img, "Device already selected")
+                            self._update_status("Device already selected", (0, 255, 255))
 
                     elif gesture == "Palm":
-                        print(f"Gesture detected: {gesture}")
                         if self.device_selection_mode and self.detector.is_device_selected():
                             # Device selected and palm shown - start file transfer
-                            self._show_feedback(img, "Starting file transfer")
+                            self._update_status("Starting file transfer", (0, 255, 0))
                             self.device_selection_mode = False
                             self.send_file_flow()
                         else:
-                            self._show_feedback(img, "No device selected")
+                            self._update_status("No device selected", (0, 0, 255))
 
             # Display status
-            status_text = "Device Selection" if self.device_selection_mode else "Ready"
-            status_color = (0, 255, 255) if self.device_selection_mode else (0, 255, 0)
-            cv2.putText(img, f"Status: {status_text}", (50, 150), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
-
-            if self.device_selection_mode:
-                remaining = int(self.detector.device_selection_timeout - (current_time - self.device_selection_start))
-                cv2.putText(img, f"Timeout in: {remaining}s", (50, 180), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
-
+            self._draw_status(img)
+            
             # Display instructions
             self._show_instructions(img)
+            
+            # Display gesture feedback
+            if self.detector.current_gesture:
+                self._draw_gesture_feedback(img)
+            
             cv2.imshow("Gesture Control", img)
 
             key = cv2.waitKey(1) & 0xFF
@@ -117,24 +111,86 @@ class FileTransferCLI:
 
         self.cleanup()
 
+    def _update_status(self, message, color):
+        """Update status message and color"""
+        self.status_message = message
+        self.status_color = color
+
+    def _draw_status(self, img):
+        """Draw status information on the image"""
+        # Status box background
+        cv2.rectangle(img, (10, 10), (300, 100), (0, 0, 0), -1)
+        
+        # Status text
+        cv2.putText(img, f"Status: {self.status_message}", (20, 40), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, self.status_color, 2)
+        
+        if self.device_selection_mode:
+            remaining = int(self.detector.device_selection_timeout - 
+                          (time.time() - self.device_selection_start))
+            cv2.putText(img, f"Timeout in: {remaining}s", (20, 70), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
+
+    def _draw_gesture_feedback(self, img):
+        """Draw gesture feedback on the image"""
+        gesture = self.detector.current_gesture
+        hold_time = time.time() - self.detector.gesture_start_time
+        progress = min(1.0, hold_time / self.detector.gesture_hold_time)
+        
+        # Draw progress bar
+        bar_width = 200
+        bar_height = 20
+        bar_x = img.shape[1] - bar_width - 20
+        bar_y = 20
+        
+        cv2.rectangle(img, (bar_x, bar_y), 
+                     (bar_x + bar_width, bar_y + bar_height), 
+                     (100, 100, 100), -1)
+        
+        cv2.rectangle(img, (bar_x, bar_y), 
+                     (bar_x + int(bar_width * progress), bar_y + bar_height), 
+                     (0, 255, 0), -1)
+        
+        cv2.putText(img, f"{gesture}: {int(progress * 100)}%", 
+                    (bar_x, bar_y + bar_height + 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+
     def _show_instructions(self, img):
-        cv2.putText(img, "Fist: Select Device", (50, 50), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-        cv2.putText(img, "Palm: Confirm Selection", (50, 80), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-        cv2.putText(img, "Press '1' or ESC to Exit", (50, 110), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+        """Draw instructions on the image"""
+        instructions = [
+            "Fist: Select Device",
+            "Palm: Confirm Selection",
+            "Press '1' or ESC to Exit"
+        ]
+        
+        for i, text in enumerate(instructions):
+            cv2.putText(img, text, (20, img.shape[0] - 30 - i * 30), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
 
-    def _show_feedback(self, img, message):
-        cv2.putText(img, message, (img.shape[1]//2 - 100, 50), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-        cv2.imshow("Gesture Control", img)
-        cv2.waitKey(500)
+    def _discover_devices(self):
+        """Discover available devices in a separate thread"""
+        devices = self._wait_for_devices()
+        if devices:
+            # Automatically select the first available device
+            target_ip = devices[0][0]
+            self.detector.select_device(target_ip)
+            self._update_status(f"Device selected: {target_ip}", (0, 255, 0))
+        else:
+            self._update_status("No devices found", (0, 0, 255))
+            self.device_selection_mode = False
 
-    def cleanup(self):
-        self.cap.release()
-        cv2.destroyAllWindows()
-        self.discovery.stop_discovery()
+    def _wait_for_devices(self, timeout=25):
+        """Wait for devices to be discovered"""
+        print("Searching for devices...")
+        start_time = time.time()
+
+        while time.time() - start_time < timeout:
+            devices = self.discovery.get_available_devices()
+            if devices:
+                return devices
+            time.sleep(0.5)
+
+        return None
 
     def send_file_flow(self):
         os.system('cls' if os.name == 'nt' else 'clear')
@@ -215,20 +271,10 @@ class FileTransferCLI:
         bars = int(percentage / 2)
         print(f"[{'#' * bars}{' ' * (50 - bars)}] {percentage}%", end='\r')
 
-    def _wait_for_devices(self, timeout=25):
-        print("Searching for devices...")
-        start_time = time.time()
-
-        while time.time() - start_time < timeout:
-            devices = self.discovery.get_available_devices()
-            if devices:
-                return devices
-            print(".", end='', flush=True)
-            time.sleep(1)
-
-        print("\nNo devices found!")
-        time.sleep(1)
-        return None
+    def cleanup(self):
+        self.cap.release()
+        cv2.destroyAllWindows()
+        self.discovery.stop_discovery()
 
 
 if __name__ == "__main__":
