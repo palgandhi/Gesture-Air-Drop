@@ -103,6 +103,7 @@ class FileTransferCLI:
                         elif self.file_selection_mode and self.available_files:
                             # Select next file
                             self.selected_file_index = (self.selected_file_index + 1) % len(self.available_files)
+                            self.standby_file = self.available_files[self.selected_file_index]  # Update standby file
                             self._update_status(f"Selected: {os.path.basename(self.available_files[self.selected_file_index])}", (0, 255, 255))
                         else:
                             self._update_status("No files available", (0, 0, 255))
@@ -170,6 +171,7 @@ class FileTransferCLI:
             return
         
         self.selected_file_index = 0
+        self.standby_file = self.available_files[0]  # Set the initial standby file
         self._update_status(f"Selected: {os.path.basename(self.available_files[0])}", (0, 255, 255))
 
     def _wait_for_sender(self):
