@@ -1,6 +1,7 @@
 import cv2
 import mediapipe as mp
 import threading
+import time
 
 class HandDetector:
     def __init__(self, mode=False, max_hands=2, detection_con=0.5, track_con=0.5):
@@ -9,7 +10,7 @@ class HandDetector:
         self.detection_con = detection_con
         self.track_con = track_con
         self.lock = threading.Lock()
-        
+            
         self.mp_hands = mp.solutions.hands
         self.hands = self.mp_hands.Hands(
             static_image_mode=self.mode,
@@ -18,6 +19,13 @@ class HandDetector:
             min_tracking_confidence=self.track_con
         )
         self.mp_draw = mp.solutions.drawing_utils
+        
+        # Device selection state
+        self.selected_device = None
+        self.device_selection_timeout = 10  # seconds
+        self.device_selection_start = 0
+        self.last_gesture_time = 0
+        self.gesture_cooldown = 1.5  # seconds between gesture detections
 
     def find_hands(self, img, draw=True):
         with self.lock:
@@ -66,3 +74,24 @@ class HandDetector:
         except Exception as e:
             print(f"Gesture detection error: {e}")
             return None
+
+    def select_device(self, device):
+        """Select a device for file transfer"""
+        self.selected_device = device
+        self.device_selection_start = time.time()
+
+    def clear_selected_device(self):
+        """Clear the selected device"""
+        self.selected_device = None
+        self.device_selection_start = 0
+
+    def is_device_selected(self):
+        """Check if a device is currently selected and not timed out"""
+        if not self.selected_device:
+            return False
+        current_time = time.time()
+        return (current_time - self.device_selection_start) < self.device_selection_timeout
+
+    def get_selected_device(self):
+        """Get the currently selected device"""
+        return self.selected_device if self.is_device_selected() else None

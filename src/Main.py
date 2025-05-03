@@ -1,6 +1,5 @@
 # menu_cli.py - Complete Final Version
 import os
-import sys
 import time
 import cv2
 
@@ -26,6 +25,8 @@ class FileTransferCLI:
         self.sender_mode = False
         self.sender_mode_timeout = 10  # seconds
         self.sender_mode_start = 0
+        self.device_selection_mode = False
+        self.device_selection_start = 0
 
     def _load_key(self):
         if os.path.exists(self.key_file):
@@ -53,6 +54,13 @@ class FileTransferCLI:
             if self.sender_mode and (current_time - self.sender_mode_start) > self.sender_mode_timeout:
                 self._show_feedback(img, "Sender mode expired")
                 self.sender_mode = False
+                self.detector.clear_selected_device()
+
+            # Handle device selection timeout
+            if self.device_selection_mode and (current_time - self.device_selection_start) > self.detector.device_selection_timeout:
+                self._show_feedback(img, "Device selection expired")
+                self.device_selection_mode = False
+                self.detector.clear_selected_device()
 
             if lmList and len(lmList) >= 21:
                 gesture = self.detector.is_palm_or_fist(lmList)
@@ -62,30 +70,41 @@ class FileTransferCLI:
 
                     if gesture == "Fist":
                         print(f"Gesture detected: {gesture}")
-                        self.sender_mode = True
-                        self.sender_mode_start = current_time
-                        self._show_feedback(img, "Sender mode activated - show Palm to receive")
-                        self.send_file_flow()
+                        if not self.device_selection_mode:
+                            # Start device selection
+                            self.device_selection_mode = True
+                            self.device_selection_start = current_time
+                            self._show_feedback(img, "Select device - show Palm to confirm")
+                            devices = self._wait_for_devices()
+                            if devices:
+                                target_ip = self._select_device(devices)
+                                if target_ip:
+                                    self.detector.select_device(target_ip)
+                                    self._show_feedback(img, f"Device selected: {target_ip}")
+                        else:
+                            # Already in device selection mode, show feedback
+                            self._show_feedback(img, "Device already selected")
 
                     elif gesture == "Palm":
                         print(f"Gesture detected: {gesture}")
-                        if self.sender_mode:
-                            self._show_feedback(img, "Receiver accepted")
-                            self.sender_mode = False
-                            self.receive_file_flow()
+                        if self.device_selection_mode and self.detector.is_device_selected():
+                            # Device selected and palm shown - start file transfer
+                            self._show_feedback(img, "Starting file transfer")
+                            self.device_selection_mode = False
+                            self.send_file_flow()
                         else:
-                            self._show_feedback(img, "No active sender detected")
+                            self._show_feedback(img, "No device selected")
 
             # Display status
-            status_text = "Sender Active" if self.sender_mode else "Ready"
-            status_color = (0, 0, 255) if self.sender_mode else (0, 255, 0)
+            status_text = "Device Selection" if self.device_selection_mode else "Ready"
+            status_color = (0, 255, 255) if self.device_selection_mode else (0, 255, 0)
             cv2.putText(img, f"Status: {status_text}", (50, 150), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
 
-            if self.sender_mode:
-                remaining = int(self.sender_mode_timeout - (current_time - self.sender_mode_start))
+            if self.device_selection_mode:
+                remaining = int(self.detector.device_selection_timeout - (current_time - self.device_selection_start))
                 cv2.putText(img, f"Timeout in: {remaining}s", (50, 180), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 1)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
 
             # Display instructions
             self._show_instructions(img)
@@ -98,9 +117,9 @@ class FileTransferCLI:
         self.cleanup()
 
     def _show_instructions(self, img):
-        cv2.putText(img, "Fist: Activate Sender Mode", (50, 50), 
+        cv2.putText(img, "Fist: Select Device", (50, 50), 
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-        cv2.putText(img, "Palm: Receive File (when sender active)", (50, 80), 
+        cv2.putText(img, "Palm: Confirm Selection", (50, 80), 
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
         cv2.putText(img, "Press '1' or ESC to Exit", (50, 110), 
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
@@ -120,12 +139,10 @@ class FileTransferCLI:
         os.system('cls' if os.name == 'nt' else 'clear')
         print("=== Send File ===")
 
-        devices = self._wait_for_devices()
-        if not devices:
-            return
-
-        target_ip = self._select_device(devices)
+        target_ip = self.detector.get_selected_device()
         if not target_ip:
+            print("No device selected!")
+            time.sleep(1)
             return
 
         file_path = input("\nEnter path to file: ").strip()
@@ -152,6 +169,7 @@ class FileTransferCLI:
             print(f"\nError: {str(e)}")
 
         input("\nPress Enter to continue...")
+        self.detector.clear_selected_device()
 
     def receive_file_flow(self):
         os.system('cls' if os.name == 'nt' else 'clear')
