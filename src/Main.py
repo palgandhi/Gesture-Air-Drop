@@ -3,6 +3,7 @@ import os
 import time
 import cv2
 import threading
+import socket
 
 from DeviceDiscovery import DeviceDiscovery
 from FileReceiver import FileReceiver
@@ -31,6 +32,13 @@ class FileTransferCLI:
         self.last_gesture = None
         self.status_message = "Ready"
         self.status_color = (0, 255, 0)  # Green
+        
+        # File transfer state
+        self.standby_file = None
+        self.standby_mode = False
+        self.receiver_mode = False
+        self.receiver_mode_start = 0
+        self.receiver_mode_timeout = 10  # seconds
 
     def _load_key(self):
         if os.path.exists(self.key_file):
@@ -54,17 +62,16 @@ class FileTransferCLI:
             lmList = self.detector.find_position(img)
             current_time = time.time()
 
-            # Handle sender mode timeout
-            if self.sender_mode and (current_time - self.sender_mode_start) > self.sender_mode_timeout:
-                self._update_status("Sender mode expired", (0, 0, 255))
-                self.sender_mode = False
-                self.detector.clear_selected_device()
+            # Handle standby mode timeout
+            if self.standby_mode and (current_time - self.sender_mode_start) > self.sender_mode_timeout:
+                self._update_status("Standby mode expired", (0, 0, 255))
+                self.standby_mode = False
+                self.standby_file = None
 
-            # Handle device selection timeout
-            if self.device_selection_mode and (current_time - self.device_selection_start) > self.detector.device_selection_timeout:
-                self._update_status("Device selection expired", (0, 0, 255))
-                self.device_selection_mode = False
-                self.detector.clear_selected_device()
+            # Handle receiver mode timeout
+            if self.receiver_mode and (current_time - self.receiver_mode_start) > self.receiver_mode_timeout:
+                self._update_status("Receiver mode expired", (0, 0, 255))
+                self.receiver_mode = False
 
             if lmList and len(lmList) >= 21:
                 gesture = self.detector.detect_gesture(lmList)
@@ -73,25 +80,28 @@ class FileTransferCLI:
                     self.last_gesture_time = current_time
 
                     if gesture == "Fist":
-                        if not self.device_selection_mode:
-                            # Start device selection
-                            self.device_selection_mode = True
-                            self.device_selection_start = current_time
-                            self._update_status("Searching for devices...", (0, 255, 255))
-                            
-                            # Start device discovery in a separate thread
-                            threading.Thread(target=self._discover_devices, daemon=True).start()
+                        if not self.standby_mode and not self.receiver_mode:
+                            # Start standby mode
+                            self.standby_mode = True
+                            self.sender_mode_start = current_time
+                            self._update_status("Select file to send", (0, 255, 255))
+                            threading.Thread(target=self._prepare_file, daemon=True).start()
                         else:
-                            self._update_status("Device already selected", (0, 255, 255))
+                            self._update_status("Already in standby mode", (0, 255, 255))
 
                     elif gesture == "Palm":
-                        if self.device_selection_mode and self.detector.is_device_selected():
-                            # Device selected and palm shown - start file transfer
-                            self._update_status("Starting file transfer", (0, 255, 0))
-                            self.device_selection_mode = False
-                            self.send_file_flow()
+                        if not self.receiver_mode and not self.standby_mode:
+                            # Start receiver mode
+                            self.receiver_mode = True
+                            self.receiver_mode_start = current_time
+                            self._update_status("Ready to receive", (0, 255, 0))
+                            threading.Thread(target=self._wait_for_sender, daemon=True).start()
+                        elif self.standby_mode and self.standby_file:
+                            # Send file to receiver
+                            self._update_status("Sending file...", (0, 255, 0))
+                            threading.Thread(target=self._send_file_to_receiver, daemon=True).start()
                         else:
-                            self._update_status("No device selected", (0, 0, 255))
+                            self._update_status("No file selected", (0, 0, 255))
 
             # Display status
             self._draw_status(img)
@@ -111,6 +121,85 @@ class FileTransferCLI:
 
         self.cleanup()
 
+    def _prepare_file(self):
+        """Prepare file for sending in standby mode"""
+        os.system('cls' if os.name == 'nt' else 'clear')
+        print("=== Select File to Send ===")
+        
+        file_path = input("\nEnter path to file: ").strip()
+        if not os.path.exists(file_path):
+            self._update_status("File does not exist", (0, 0, 255))
+            self.standby_mode = False
+            return
+
+        self.standby_file = file_path
+        self._update_status("File ready - Show Palm to send", (0, 255, 0))
+
+    def _wait_for_sender(self):
+        """Wait for a sender to connect"""
+        receiver = FileReceiver(self.port)
+        if self.key:
+            receiver.set_decryption(self.key)
+
+        try:
+            receiver.start()
+            self._update_status("Waiting for sender...", (0, 255, 255))
+            receiver.accept_connection()
+            saved_path = receiver.receive_file(self._progress_bar)
+            if saved_path:
+                self._update_status("File received!", (0, 255, 0))
+                print(f"\n🎉 File saved to: {saved_path}")
+            else:
+                self._update_status("Reception failed", (0, 0, 255))
+        except Exception as e:
+            self._update_status(f"Error: {str(e)}", (0, 0, 255))
+        finally:
+            self.receiver_mode = False
+
+    def _send_file_to_receiver(self):
+        """Send file to waiting receiver"""
+        if not self.standby_file:
+            self._update_status("No file selected", (0, 0, 255))
+            return
+
+        devices = self._wait_for_devices()
+        if not devices:
+            self._update_status("No receivers found", (0, 0, 255))
+            return
+
+        # Find a device in receiver mode
+        target_ip = None
+        for ip, _ in devices:
+            try:
+                # Try to connect to check if device is in receiver mode
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(1)
+                sock.connect((ip, self.port))
+                target_ip = ip
+                sock.close()
+                break
+            except:
+                continue
+
+        if not target_ip:
+            self._update_status("No receivers found", (0, 0, 255))
+            return
+
+        sender = FileSender(target_ip, self.port)
+        if self.key:
+            sender.set_encryption(self.key)
+
+        try:
+            if sender.send_file(self.standby_file, self._progress_bar):
+                self._update_status("Transfer successful!", (0, 255, 0))
+            else:
+                self._update_status("Transfer failed", (0, 0, 255))
+        except Exception as e:
+            self._update_status(f"Error: {str(e)}", (0, 0, 255))
+        finally:
+            self.standby_mode = False
+            self.standby_file = None
+
     def _update_status(self, message, color):
         """Update status message and color"""
         self.status_message = message
@@ -125,9 +214,14 @@ class FileTransferCLI:
         cv2.putText(img, f"Status: {self.status_message}", (20, 40), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, self.status_color, 2)
         
-        if self.device_selection_mode:
-            remaining = int(self.detector.device_selection_timeout - 
-                          (time.time() - self.device_selection_start))
+        if self.standby_mode:
+            remaining = int(self.sender_mode_timeout - 
+                          (time.time() - self.sender_mode_start))
+            cv2.putText(img, f"Timeout in: {remaining}s", (20, 70), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
+        elif self.receiver_mode:
+            remaining = int(self.receiver_mode_timeout - 
+                          (time.time() - self.receiver_mode_start))
             cv2.putText(img, f"Timeout in: {remaining}s", (20, 70), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
 
@@ -157,31 +251,31 @@ class FileTransferCLI:
 
     def _show_instructions(self, img):
         """Draw instructions on the image"""
-        instructions = [
-            "Fist: Select Device",
-            "Palm: Confirm Selection",
-            "Press '1' or ESC to Exit"
-        ]
+        if self.standby_mode:
+            instructions = [
+                "Fist: File ready to send",
+                "Palm: Send file to receiver",
+                "Press '1' or ESC to Exit"
+            ]
+        elif self.receiver_mode:
+            instructions = [
+                "Palm: Ready to receive",
+                "Waiting for sender...",
+                "Press '1' or ESC to Exit"
+            ]
+        else:
+            instructions = [
+                "Fist: Select file to send",
+                "Palm: Ready to receive",
+                "Press '1' or ESC to Exit"
+            ]
         
         for i, text in enumerate(instructions):
             cv2.putText(img, text, (20, img.shape[0] - 30 - i * 30), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
 
-    def _discover_devices(self):
-        """Discover available devices in a separate thread"""
-        devices = self._wait_for_devices()
-        if devices:
-            # Automatically select the first available device
-            target_ip = devices[0][0]
-            self.detector.select_device(target_ip)
-            self._update_status(f"Device selected: {target_ip}", (0, 255, 0))
-        else:
-            self._update_status("No devices found", (0, 0, 255))
-            self.device_selection_mode = False
-
     def _wait_for_devices(self, timeout=25):
         """Wait for devices to be discovered"""
-        print("Searching for devices...")
         start_time = time.time()
 
         while time.time() - start_time < timeout:
@@ -191,81 +285,6 @@ class FileTransferCLI:
             time.sleep(0.5)
 
         return None
-
-    def send_file_flow(self):
-        os.system('cls' if os.name == 'nt' else 'clear')
-        print("=== Send File ===")
-
-        target_ip = self.detector.get_selected_device()
-        if not target_ip:
-            print("No device selected!")
-            time.sleep(1)
-            return
-
-        file_path = input("\nEnter path to file: ").strip()
-        if not os.path.exists(file_path):
-            print("File does not exist!")
-            time.sleep(1)
-            return
-
-        use_encryption = False
-        if self.key:
-            use_encryption = input("Use encryption? (y/n): ").lower() == 'y'
-
-        sender = FileSender(target_ip, self.port)
-        if use_encryption:
-            sender.set_encryption(self.key)
-
-        try:
-            print("\nSending file...")
-            if sender.send_file(file_path, self._progress_bar):
-                print("\n✅ Transfer successful!")
-            else:
-                print("\n❌ Transfer failed")
-        except Exception as e:
-            print(f"\nError: {str(e)}")
-
-        input("\nPress Enter to continue...")
-        self.detector.clear_selected_device()
-
-    def receive_file_flow(self):
-        os.system('cls' if os.name == 'nt' else 'clear')
-        print("=== Receive Files ===")
-        print("Listening for incoming files...")
-        print("Press Ctrl+C to stop listening\n")
-
-        receiver = FileReceiver(self.port)
-        if self.key:
-            receiver.set_decryption(self.key)
-
-        try:
-            receiver.start()
-            receiver.accept_connection()
-            saved_path = receiver.receive_file(self._progress_bar)
-            if saved_path:
-                print(f"\n🎉 File saved to: {saved_path}")
-            else:
-                print("\n❌ Reception failed")
-        except KeyboardInterrupt:
-            print("\nStopped listening")
-        except Exception as e:
-            print(f"\nError: {str(e)}")
-
-        input("Press Enter to continue...")
-
-    def generate_key_flow(self):
-        os.system('cls' if os.name == 'nt' else 'clear')
-        print("=== Generate Encryption Key ===")
-        if os.path.exists(self.key_file):
-            print("WARNING: This will overwrite existing key!")
-
-        if input("Generate new key? (y/n): ").lower() == 'y':
-            key = SecurityHandler.generate_key()
-            with open(self.key_file, 'wb') as f:
-                f.write(key)
-            print(f"🔑 New key saved to {self.key_file}")
-            self.key = key
-            time.sleep(1)
 
     def _progress_bar(self, percentage):
         bars = int(percentage / 2)
